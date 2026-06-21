@@ -1,60 +1,93 @@
-import asyncio
-import requests
-import os
-from aiogram import Bot, Dispatcher, types
-
-# 🔐 ключи берутся из Render (Environment Variables)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
-bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# 🧠 память (временная)
+# =====================
+# 🧠 ПАМЯТЬ
+# =====================
 memory = {}
 
-def ask_ai(user_id, text):
-    url = "https://openrouter.ai/api/v1/chat/completions"
+def get_memory(user_id: int):
+    return memory.get(user_id, [])
 
-    history = memory.get(user_id, [])
-    history.append({"role": "user", "content": text})
-    history = history[-10:]
-    memory[user_id] = history
+def add_memory(user_id: int, role: str, text: str):
+    if user_id not in memory:
+        memory[user_id] = []
+
+    memory[user_id].append({"role": role, "text": text})
+
+    # ограничение памяти
+    memory[user_id] = memory[user_id][-MAX_MEMORY:]
+
+
+# =====================
+# 🤖 ЗАПРОС К OPENROUTER (БЫСТРЫЙ)
+# =====================
+async def ask_ai(messages):
+    url = "https://openrouter.ai/api/v1/chat/completions"
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
-    data = {
-        "model": "meta-llama/llama-3.1-8b-instruct",
-        "messages": history
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 500
     }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"]
+
+
+# =====================
+# 🚀 START
+# =====================
+@dp.message(CommandStart())
+async def start(msg: types.Message):
+    await msg.answer("🤖 AI бот запущен! Напиши сообщение.")
+
+# =====================
+# 💬 ОСНОВНОЙ ХЕНДЛЕР
+# =====================
+@dp.message()
+async def chat(msg: types.Message):
+    user_id = msg.from_user.id
+    user_text = msg.text
+
+    # анти-спам минимальный
+    await msg.chat.do("typing")
+
+    # память
+    add_memory(user_id, "user", user_text)
+
+    messages = [
+        {"role": "system", "content": "Ты умный, быстрый и краткий AI ассистент."}
+    ]
+
+    for m in get_memory(user_id):
+        messages.append({
+            "role": m["role"],
+            "content": m["text"]
+        })
 
     try:
-        r = requests.post(url, headers=headers, json=data, timeout=30)
-        result = r.json()
+        answer = await ask_ai(messages)
 
-        if "choices" not in result:
-            return f"Ошибка API: {result}"
+        add_memory(user_id, "assistant", answer)
 
-        answer = result["choices"][0]["message"]["content"]
-
-        history.append({"role": "assistant", "content": answer})
-        memory[user_id] = history
-
-        return answer
+        await msg.answer(answer)
 
     except Exception as e:
-        return f"Ошибка: {e}"
+        await msg.answer("⚠️ Ошибка AI запроса")
+        print("ERROR:", e)
 
 
-@dp.message()
-async def handler(message: types.Message):
-    response = ask_ai(message.from_user.id, message.text)
-    await message.answer(response)
-
-
+# =====================
+# ▶️ RUN
+# =====================
 async def main():
     print("BOT STARTED")
     await dp.start_polling(bot)
